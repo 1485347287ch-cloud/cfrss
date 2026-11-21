@@ -3,7 +3,7 @@ import type { Env } from '../types';
 import { getArticleContent, loadGitHubConfig } from '../services/content-store';
 import { refreshSubscriptionsAndStore } from '../services/feed-refresh';
 import { notFoundError, validationError } from '../utils/errors';
-import { parsePageLimit, isApproachingCpuLimit, markTruncated } from '../middleware/cpu-monitor';
+import { parsePageLimit } from '../middleware/cpu-monitor';
 
 /**
  * GET /api/articles
@@ -53,14 +53,9 @@ export async function handleListArticles(c: Context<{ Bindings: Env }>) {
 
   const articles = (result.results ?? []).map(mapArticleRow);
 
-  // Check if we're approaching CPU limits after DB query
-  let truncated = false;
-  if (isApproachingCpuLimit(c)) {
-    truncated = true;
-    markTruncated(c);
-  }
-
-  return c.json({ articles, truncated, limit, offset });
+  // D1 returned this complete SQL page. Database/network latency is not
+  // truncation: marking it as such prevents clients loading the next page.
+  return c.json({ articles, truncated: false, limit, offset });
 }
 
 /**
