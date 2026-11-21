@@ -51,7 +51,10 @@ export interface ParsedFeedResult {
  * Parse an RSS 2.0 or Atom 1.0 XML feed into structured article data.
  * Auto-detects the feed format based on root element.
  */
-export function parseFeed(xml: string): ParsedFeedResult {
+export function parseFeed(xml: string, sourceUrl = ''): ParsedFeedResult {
+  const hotList = parseHotListFeed(xml, sourceUrl);
+  if (hotList) return hotList;
+
   if (!xml || xml.trim().length === 0) {
     return { feedTitle: '', articles: [] };
   }
@@ -65,6 +68,56 @@ export function parseFeed(xml: string): ParsedFeedResult {
 
   // Unknown format — return empty
   return { feedTitle: '', articles: [] };
+}
+
+/** Adapt the public hot-search snapshot without exposing account credentials. */
+export function parseHotListFeed(text: string, sourceUrl: string): ParsedFeedResult | null {
+  let url: URL;
+  try { url = new URL(sourceUrl); } catch { return null; }
+  if (url.protocol !== 'https:' || url.hostname !== 'solarhell.github.io'
+    || url.pathname !== '/hot-search-crawler/latest.json') return null;
+
+  const platforms: Record<string, { name: string; hosts: string[] }> = {
+    weibo: { name: '微博', hosts: ['s.weibo.com', 'weibo.com', 'www.weibo.com'] },
+    douyin: { name: '抖音', hosts: ['www.douyin.com', 'douyin.com'] },
+    xiaohongshu: { name: '小红书', hosts: ['www.xiaohongshu.com', 'xiaohongshu.com'] },
+  };
+  const platform = url.searchParams.get('platform') || '';
+  if (!Object.hasOwn(platforms, platform)) throw new Error('请选择微博、抖音或小红书热榜');
+  const info = platforms[platform];
+  const data = JSON.parse(text);
+  if (data?.schema_version !== 1 || !Array.isArray(data.boards)) {
+    throw new Error('热榜数据格式已变化，请检查第三方来源');
+  }
+  const board = data.boards.find((item: { platform?: unknown } | null) => item?.platform === platform);
+  if (board?.ok !== true || !Array.isArray(board.items)) {
+    throw new Error(`${info.name}热榜暂不可用，请稍后刷新`);
+  }
+  const fetchedAt = Date.parse(board.fetched_at || data.generated_at);
+  if (!Number.isFinite(fetchedAt) || Date.now() - fetchedAt > 36 * 60 * 60 * 1000) {
+    throw new Error(`${info.name}热榜快照已过期，请稍后刷新`);
+  }
+  const publishedAt = new Date(fetchedAt).toISOString();
+  const escape = (value: string) => value.replace(/[&<>"']/g, (char) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
+  const articles: ParsedArticle[] = [];
+  for (const item of board.items.slice(0, 100)) {
+    if (typeof item?.title !== 'string' || !item.title.trim() || typeof item.url !== 'string') continue;
+    let target: URL;
+    try { target = new URL(item.url); } catch { continue; }
+    if (target.protocol !== 'https:' || !info.hosts.includes(target.hostname)) continue;
+    const rank = Number.isInteger(item.rank) && item.rank > 0 ? `第 ${item.rank} 位` : '未提供';
+    const hot = typeof item.hot_text === 'string' ? item.hot_text
+      : typeof item.hot === 'number' && Number.isFinite(item.hot) ? String(item.hot) : '未提供';
+    const summary = `快照排名：${rank}；热度：${hot}。采集时间：${publishedAt}。数据由第三方 hot-search-crawler 提供，并非平台官方 RSS。`;
+    articles.push({
+      title: item.title.trim(), author: `${info.name}热搜`, publishedAt, summary,
+      htmlContent: `<p>${escape(summary)}</p><p><a href="${escape(target.href)}" rel="noopener noreferrer">查看平台热搜</a></p>`,
+      sourceUrl: target.href,
+    });
+  }
+  if (articles.length === 0) throw new Error(`${info.name}热榜暂无有效内容`);
+  return { feedTitle: `${info.name}热搜（第三方快照）`, articles };
 }
 
 // === Format Detection ===
@@ -523,7 +576,7 @@ async function fetchFeedWithAgent(
       xml = xml.slice(0, PARSE_CAP_BYTES) + '\n</channel></rss>';
     }
 
-    const result = parseFeed(xml);
+    const result = parseFeed(xml, url);
     return result.articles;
   } catch (error: unknown) {
     if (error instanceof Error && error.name === 'AbortError') {
