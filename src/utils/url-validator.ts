@@ -3,6 +3,8 @@
  * Provides synchronous format validation and async feed probe with timeout.
  */
 
+import { parseHotListFeed } from '../services/content-fetcher';
+
 // === Types ===
 
 export type ValidationResult =
@@ -75,7 +77,7 @@ export async function probeUrl(url: string): Promise<ProbeResult> {
     }
 
     const text = await response.text();
-    return parseFeedContent(text);
+    return parseFeedContent(text, url);
   } catch (error: unknown) {
     if (error instanceof Error && error.name === 'AbortError') {
       return { valid: false, reason: 'timeout', message: 'Feed fetch timed out after 10 seconds' };
@@ -91,7 +93,13 @@ export async function probeUrl(url: string): Promise<ProbeResult> {
  * Parses response text to determine if it's a valid RSS 2.0 or Atom 1.0 feed.
  * Extracts the feed title on success.
  */
-function parseFeedContent(text: string): ProbeResult {
+function parseFeedContent(text: string, sourceUrl: string): ProbeResult {
+  try {
+    const hotList = parseHotListFeed(text, sourceUrl);
+    if (hotList) return { valid: true, title: hotList.feedTitle };
+  } catch (error: unknown) {
+    return { valid: false, reason: 'invalid_feed', message: error instanceof Error ? error.message : 'Invalid hot-list snapshot' };
+  }
   const trimmed = text.trim();
 
   // Check for RSS 2.0 root element
